@@ -1,12 +1,9 @@
-
 import streamlit as st
 import pandas as pd
 import re
 import time
 from datetime import datetime
 import requests
-from requests_oauthlib import OAuth1
-import base64
 import json
 
 # Set up the page
@@ -36,7 +33,7 @@ st.markdown('<p class="sub-header">Extract follower information and website/emai
 # Information section
 with st.expander("ℹ️ How to use this tool"):
     st.write("""
-    1. Enter your Twitter API credentials in the sidebar
+    1. Enter your Twitter API Bearer Token in the sidebar
     2. Enter a valid X (Twitter) profile URL in the input field
     3. Click the 'Extract Follower Data' button to begin the process
     4. The tool will extract follower information including usernames and website URLs
@@ -49,10 +46,10 @@ with st.expander("ℹ️ How to use this tool"):
 # Disclaimer
 st.markdown("""
 <div class="warning-box">
-⚠️ <strong>Important Security Notice:</strong> 
+⚠️ <strong>Important:</strong> 
+- You need Twitter API access with appropriate permissions
+- This tool may not work with Essential access level (apply for Elevated access)
 - Never share your API keys publicly
-- The keys shown in this demo are placeholder values only
-- Always store sensitive credentials securely using environment variables or secret management tools
 - This tool is for educational purposes only
 </div>
 """, unsafe_allow_html=True)
@@ -61,14 +58,10 @@ st.markdown("""
 st.sidebar.header("Twitter API Configuration")
 st.sidebar.markdown("""
 <div class="api-section">
-Enter your Twitter API credentials below. These are required to access the Twitter API.
+You need a Twitter API Bearer Token. If you're getting errors, you may need to apply for Elevated access.
 </div>
 """, unsafe_allow_html=True)
 
-api_key = st.sidebar.text_input("API Key", type="password", value="", help="Your Twitter API Key")
-api_secret = st.sidebar.text_input("API Secret", type="password", value="", help="Your Twitter API Secret")
-access_token = st.sidebar.text_input("Access Token", type="password", value="", help="Your Twitter Access Token")
-access_token_secret = st.sidebar.text_input("Access Token Secret", type="password", value="", help="Your Twitter Access Token Secret")
 bearer_token = st.sidebar.text_input("Bearer Token", type="password", value="", help="Your Twitter Bearer Token (for API v2)")
 
 # Input section
@@ -87,56 +80,83 @@ def extract_username(url):
         return match.group(2)
     return None
 
-# Function to get user ID from username using OAuth 1.0a
-def get_user_id(username, api_key, api_secret, access_token, access_token_secret):
-    if not all([api_key, api_secret, access_token, access_token_secret]):
-        st.error("Missing API credentials. Please check your API configuration.")
+# Function to get user ID from username using API v2
+def get_user_id(username, bearer_token):
+    if not bearer_token:
+        st.error("Missing Bearer Token. Please check your API configuration.")
         return None
         
-    auth = OAuth1(api_key, api_secret, access_token, access_token_secret)
-    url = f"https://api.twitter.com/1.1/users/show.json?screen_name={username}"
+    headers = {
+        "Authorization": f"Bearer {bearer_token}"
+    }
+    url = f"https://api.twitter.com/2/users/by/username/{username}"
     
     try:
-        response = requests.get(url, auth=auth)
+        response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            return response.json()['id_str']
+            return response.json()['data']['id']
         else:
-            st.error(f"Error fetching user ID: {response.status_code} - {response.text}")
+            error_msg = response.json().get('errors', [{}])[0].get('message', 'Unknown error')
+            st.error(f"Error fetching user ID: {response.status_code} - {error_msg}")
+            
+            # Provide guidance based on common errors
+            if "access level" in error_msg.lower():
+                st.info("""
+                🔍 **Access Level Issue Detected**
+                
+                It appears your Twitter developer account has limited API access.
+                
+                **To fix this:**
+                1. Go to https://developer.twitter.com/
+                2. Navigate to your Project & App
+                3. Click on the "Products" tab
+                4. Apply for **Elevated access**
+                5. Wait for approval (may take several days)
+                """)
+                
             return None
     except Exception as e:
         st.error(f"Exception occurred while fetching user ID: {str(e)}")
         return None
 
-# Function to get followers with pagination using OAuth 1.0a
-def get_followers(user_id, api_key, api_secret, access_token, access_token_secret, max_results=100):
-    if not all([api_key, api_secret, access_token, access_token_secret]):
+# Function to get followers with pagination using API v2
+def get_followers(user_id, bearer_token, max_results=10):
+    if not bearer_token:
         return []
         
     followers = []
-    next_cursor = -1
-    auth = OAuth1(api_key, api_secret, access_token, access_token_secret)
+    next_token = None
+    headers = {
+        "Authorization": f"Bearer {bearer_token}"
+    }
     
     # For demo purposes, we'll limit to a few pages
     page_count = 0
-    max_pages = 3  # Adjust based on your needs and rate limits
+    max_pages = 2  # Very limited due to API restrictions
     
-    while next_cursor != 0 and page_count < max_pages and len(followers) < max_results:
-        url = f"https://api.twitter.com/1.1/followers/list.json?user_id={user_id}&count=200"
-        if next_cursor and next_cursor != -1:
-            url += f"&cursor={next_cursor}"
+    while page_count < max_pages and len(followers) < max_results:
+        url = f"https://api.twitter.com/2/users/{user_id}/followers"
+        params = {
+            "max_results": min(10, max_results - len(followers)),
+            "user.fields": "id,name,username,description,url,verified,public_metrics,created_at"
+        }
+        
+        if next_token:
+            params["pagination_token"] = next_token
             
         try:
-            response = requests.get(url, auth=auth)
+            response = requests.get(url, headers=headers, params=params)
             if response.status_code == 200:
                 data = response.json()
-                followers.extend(data['users'])
-                next_cursor = data['next_cursor']
+                followers.extend(data.get('data', []))
+                next_token = data.get('meta', {}).get('next_token')
                 page_count += 1
                 
                 # Respect rate limits
-                time.sleep(1)
+                time.sleep(2)
             else:
-                st.error(f"Error fetching followers: {response.status_code} - {response.text}")
+                error_msg = response.json().get('errors', [{}])[0].get('message', 'Unknown error')
+                st.error(f"Error fetching followers: {response.status_code} - {error_msg}")
                 break
         except Exception as e:
             st.error(f"Exception occurred while fetching followers: {str(e)}")
@@ -162,8 +182,8 @@ def extract_emails_from_website(url):
 if st.button("Extract Follower Data"):
     if not twitter_url:
         st.error("Please enter a valid X profile URL")
-    elif not all([api_key, api_secret, access_token, access_token_secret]):
-        st.error("Please complete all API credential fields in the sidebar")
+    elif not bearer_token:
+        st.error("Please enter your Bearer Token in the sidebar")
     else:
         # Extract username from URL
         username = extract_username(twitter_url)
@@ -177,18 +197,18 @@ if st.button("Extract Follower Data"):
         
         # Step 1: Get user ID
         status_text.text("Step 1: Getting user ID...")
-        user_id = get_user_id(username, api_key, api_secret, access_token, access_token_secret)
+        user_id = get_user_id(username, bearer_token)
         if not user_id:
             st.stop()
         progress_bar.progress(25)
         
         # Step 2: Get followers
         status_text.text("Step 2: Fetching followers...")
-        followers_data = get_followers(user_id, api_key, api_secret, access_token, access_token_secret, max_results=100)
+        followers_data = get_followers(user_id, bearer_token, max_results=10)
         progress_bar.progress(50)
         
         if not followers_data:
-            st.error("No followers found or error fetching data")
+            st.error("No followers found or error fetching data. You may need Elevated API access.")
             st.stop()
             
         # Step 3: Process data
@@ -203,17 +223,17 @@ if st.button("Extract Follower Data"):
                 emails = extract_emails_from_website(website)
                 
             processed_data.append({
-                "id": follower.get('id_str', '') if isinstance(follower, dict) else '',
-                "username": follower.get('screen_name', '') if isinstance(follower, dict) else '',
-                "name": follower.get('name', '') if isinstance(follower, dict) else '',
-                "description": (follower.get('description', '')[:100] + "...") if isinstance(follower, dict) and follower.get('description') and len(follower.get('description')) > 100 else (follower.get('description', '') if isinstance(follower, dict) else ''),
+                "id": follower.get('id', ''),
+                "username": follower.get('username', ''),
+                "name": follower.get('name', ''),
+                "description": (follower.get('description', '')[:100] + "...") if follower.get('description') and len(follower.get('description')) > 100 else follower.get('description', ''),
                 "website": website,
                 "emails": ", ".join(emails),
-                "verified": follower.get('verified', False) if isinstance(follower, dict) else False,
-                "followers_count": follower.get('followers_count', 0) if isinstance(follower, dict) else 0,
-                "following_count": follower.get('friends_count', 0) if isinstance(follower, dict) else 0,
-                "tweet_count": follower.get('statuses_count', 0) if isinstance(follower, dict) else 0,
-                "created_at": follower.get('created_at', '') if isinstance(follower, dict) else ''
+                "verified": follower.get('verified', False),
+                "followers_count": follower.get('public_metrics', {}).get('followers_count', 0),
+                "following_count": follower.get('public_metrics', {}).get('following_count', 0),
+                "tweet_count": follower.get('public_metrics', {}).get('tweet_count', 0),
+                "created_at": follower.get('created_at', '')
             })
             
             # Update progress
@@ -281,23 +301,37 @@ if st.button("Extract Follower Data"):
         </div>
         """, unsafe_allow_html=True)
 
-# Add information about implementation
+# Add information about API access
 st.markdown("---")
-st.header("Implementation Notes")
+st.header("API Access Information")
 
 st.markdown("""
 <div class="info-box">
-This implementation uses Twitter API v1.1 with OAuth 1.0a authentication.
+<h3>Understanding Twitter API Access Levels</h3>
 
-For production use, you would need to:
-1. Handle rate limits more effectively with proper retry logic
-2. Implement more sophisticated website scraping for email extraction
-3. Add error handling for various edge cases
-4. Consider using a database for storing results for large datasets
-5. Implement proper logging and monitoring
+Twitter offers three access levels:
 
-The current implementation is limited to a small number of followers for demonstration purposes.
-Adjust the max_results parameter in the get_followers function for larger extractions.
+1. <strong>Essential</strong> (Free) - Limited access to API v2 endpoints
+2. <strong>Elevated</strong> (Free) - Full access to API v2 endpoints + limited v1.1 access
+3. <strong>Pro</strong> (Paid) - Higher rate limits + additional features
+
+<h3>How to Apply for Elevated Access:</h3>
+<ol>
+  <li>Go to https://developer.twitter.com/</li>
+  <li>Navigate to your Project & App</li>
+  <li>Click on the "Products" tab</li>
+  <li>Click "Apply" for Elevated access</li>
+  <li>Complete the application form</li>
+  <li>Wait for approval (may take several days)</li>
+</ol>
+
+<h3>In the Meantime:</h3>
+<p>While waiting for Elevated access, you can:</p>
+<ul>
+  <li>Test with the limited API v2 endpoints available</li>
+  <li>Use the simulated data functionality</li>
+  <li>Explore other Twitter API endpoints that are available with your current access level</li>
+</ul>
 </div>
 """, unsafe_allow_html=True)
 
@@ -306,7 +340,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style="text-align: center; color: gray;">
-    <p>This tool requires a Twitter Developer account and API access.</p>
+    <p>This tool requires a Twitter Developer account with appropriate API access level.</p>
     <p>Built with Streamlit | For educational purposes only</p>
     </div>
     """,
